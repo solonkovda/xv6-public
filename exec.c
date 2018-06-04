@@ -8,11 +8,19 @@
 #include "elf.h"
 #include "fs.h"
 
-#define MAX_SHEBANG_LENGTH 1024
+#define MAX_SHEBANG_LENGTH 4096
+#define MAX_SHEBANG_DEPTH 10
 
-int
-exec(char *path, char **argv)
+
+static int
+exec_rec(char *path, char **argv, int shebang_depth)
 {
+  if (shebang_depth > MAX_SHEBANG_DEPTH) {
+      end_op();
+      cprintf("exec: fail\n");
+      return -1;
+  }
+  
   char *s, *last;
   int i, off;
   uint argc, sz, sp, ustack[3+MAXARG+1];
@@ -21,8 +29,6 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pde_t *pgdir, *oldpgdir;
   struct proc *curproc = myproc();
-  
-  char *new_argv[5 + MAXARG];
 
   begin_op();
 
@@ -40,7 +46,7 @@ exec(char *path, char **argv)
     goto bad;
   if (buffer[0] == '#' && buffer[1] == '!') {
     // Handling shebang
-    char shebang[MAX_SHEBANG_LENGTH];
+    char *shebang = kalloc();
     int sz = readi(ip, shebang, 2, MAX_SHEBANG_LENGTH);
     int found_last = 0;
     for (int i = 0; i < sz; i++) {
@@ -50,24 +56,45 @@ exec(char *path, char **argv)
         break;
       }
     }
-    if (!found_last)
+    if (!found_last) {
+      kfree(shebang);
       goto bad;
-    // Shebang found, loading interpreter ip
-    struct inode *interpreter_ip = namei(shebang);
-    if (interpreter_ip == 0)
-      goto bad;
+    }
+      
     iunlockput(ip);
-    ilock(interpreter_ip);
-    ip = interpreter_ip;
     
     // Modifying argv
-    new_argv[0] = path;
-    int i = 0;
-    for (char **ptr = argv; *ptr; ptr++) {
-      new_argv[++i] = *ptr;
+    char **new_argv = 0;
+    if (shebang_depth == 0) {
+      new_argv = (char**)kalloc();
+      new_argv[0] = shebang;
+      new_argv[1] = path;
+      int i = 1;
+      for (char **ptr = argv+1; *ptr; ptr++) {
+        new_argv[++i] = *ptr;
+      }
+      new_argv[++i] = 0;
+      argv = new_argv;
     }
-    new_argv[++i] = 0;
-    argv = new_argv;
+    else {
+      // In order to not allocate new memory buffer, we move all args to the
+      // right.
+      char **last;
+      
+      for (last = argv; *last; last++);
+      *(last+1) = 0;
+      for (; last != (argv+1); last--) {
+        *last = *(last-1);
+      }
+      argv[0] = shebang;
+      argv[1] = path;
+    }
+    end_op();
+    int res = exec_rec(shebang, argv, shebang_depth + 1);
+    kfree(shebang);
+    if (shebang_depth == 0) 
+      kfree((char*)new_argv);
+    return res;
   }
 
   // Check ELF header
@@ -78,7 +105,6 @@ exec(char *path, char **argv)
 
   if((pgdir = setupkvm()) == 0)
     goto bad;
-
   // Load program into memory.
   sz = 0;
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
@@ -133,7 +159,6 @@ exec(char *path, char **argv)
     if(*s == '/')
       last = s+1;
   safestrcpy(curproc->name, last, sizeof(curproc->name));
-
   // Commit to the user image.
   oldpgdir = curproc->pgdir;
   curproc->pgdir = pgdir;
@@ -152,4 +177,9 @@ exec(char *path, char **argv)
     end_op();
   }
   return -1;
+}
+
+int
+exec(char *path, char **argv) {
+  return exec_rec(path, argv, 0);
 }
