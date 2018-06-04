@@ -6,6 +6,9 @@
 #include "defs.h"
 #include "x86.h"
 #include "elf.h"
+#include "fs.h"
+
+#define MAX_SHEBANG_LENGTH 1024
 
 int
 exec(char *path, char **argv)
@@ -18,6 +21,8 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pde_t *pgdir, *oldpgdir;
   struct proc *curproc = myproc();
+  
+  char *new_argv[5 + MAXARG];
 
   begin_op();
 
@@ -28,6 +33,42 @@ exec(char *path, char **argv)
   }
   ilock(ip);
   pgdir = 0;
+  
+  // Checking for shebang
+  char buffer[2];
+  if (readi(ip,buffer, 0, 2) != 2)
+    goto bad;
+  if (buffer[0] == '#' && buffer[1] == '!') {
+    // Handling shebang
+    char shebang[MAX_SHEBANG_LENGTH];
+    int sz = readi(ip, shebang, 2, MAX_SHEBANG_LENGTH);
+    int found_last = 0;
+    for (int i = 0; i < sz; i++) {
+      if (shebang[i] == ' ' || shebang[i] == '\n') {
+        shebang[i] = '\0';
+        found_last = 1;
+        break;
+      }
+    }
+    if (!found_last)
+      goto bad;
+    // Shebang found, loading interpreter ip
+    struct inode *interpreter_ip = namei(shebang);
+    if (interpreter_ip == 0)
+      goto bad;
+    iunlockput(ip);
+    ilock(interpreter_ip);
+    ip = interpreter_ip;
+    
+    // Modifying argv
+    new_argv[0] = path;
+    int i = 0;
+    for (char **ptr = argv; *ptr; ptr++) {
+      new_argv[++i] = *ptr;
+    }
+    new_argv[++i] = 0;
+    argv = new_argv;
+  }
 
   // Check ELF header
   if(readi(ip, (char*)&elf, 0, sizeof(elf)) != sizeof(elf))
